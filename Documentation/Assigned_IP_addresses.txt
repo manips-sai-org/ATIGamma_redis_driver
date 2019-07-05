@@ -1,0 +1,4 @@
+NETbox 00:16:bd:00:23:5b : 172.16.0.20
+NETbox 00:16:bd:00:23:7b : 172.16.0.21
+
+default (pin 9 in the net box up) : 192.168.1.1
