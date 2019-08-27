@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "filters/ButterworthFilter.h"
 
 #include <signal.h>
 bool runloop = true;
@@ -25,6 +26,11 @@ using namespace std;
 using namespace Eigen;
 
 const string SENSED_FORCE_KEY = "sai2::ATIGamma_Sensor::force_torque";
+
+sai::ButterworthFilter filter;
+const double cutoff_freq = 0.05;  //the cutoff frequency of the filter, in the range of (0 0.5) of sampling freq
+bool use_filter = false;
+
 
 /* Typedefs used so integer sizes are more explicit */
 typedef unsigned int uint32;
@@ -70,6 +76,12 @@ int main ( int argc, char ** argv ) {
 		return -1;
 	}
 	
+    if(use_filter)
+    {
+        filter.setDimension(6);
+        filter.setCutoffFrequency(cutoff_freq);
+    }
+
 	// start redis client
 	HiredisServerInfo info;
 	info.hostname_ = "127.0.0.1";
@@ -104,6 +116,8 @@ int main ( int argc, char ** argv ) {
 		exit(2);
 	}
 	send( socketHandle, request, 8, 0 );
+	
+	cout << "Start streaming Force and Moment" << endl;
 
 	runloop = true;
 	while(runloop)
@@ -118,7 +132,14 @@ int main ( int argc, char ** argv ) {
 			FT_eigen(i) = -resp.FTData[i] / 1e6;
 		}
 
-		redis_client.setEigenMatrixDerived(SENSED_FORCE_KEY, FT_eigen);
+		Eigen::VectorXd filtered_signal = FT_eigen;
+		if(use_filter)
+		{
+		    filtered_signal = filter.update(FT_eigen);
+		}
+
+
+		redis_client.setEigenMatrixDerived(SENSED_FORCE_KEY, filtered_signal);
 
 		// /* Output the response data. */
 		// cout << "Status : " << resp.status << endl;
