@@ -25,7 +25,7 @@ void sighandler(int sig)
 using namespace std;
 using namespace Eigen;
 
-const string SENSED_FORCE_KEY = "sai2::ATIGamma_Sensor::force_torque";
+string SENSED_FORCE_KEY = "sai2::ATIGamma_Sensor::force_torque";
 
 sai::ButterworthFilter filter;
 const double cutoff_freq = 0.05;  //the cutoff frequency of the filter, in the range of (0 0.5) of sampling freq
@@ -76,6 +76,17 @@ int main ( int argc, char ** argv ) {
 		return -1;
 	}
 	
+	std::string sensor_ip = argv[1];
+
+	if(sensor_ip == "172.16.0.20")
+	{
+		SENSED_FORCE_KEY = "sai2::ATIGamma_Sensor::Clyde::force_torque";
+	}
+	else if(sensor_ip == "172.16.0.21")
+	{
+		SENSED_FORCE_KEY = "sai2::ATIGamma_Sensor::Bonnie::force_torque";
+	}
+
     if(use_filter)
     {
         filter.setDimension(6);
