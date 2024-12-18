@@ -1,19 +1,21 @@
 /* Simple demo showing how to communicate with Net F/T using C language. */
 
-#include <Eigen/Dense>
-#include <iostream>
-#include "RedisClient.h"
-
 #include <arpa/inet.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <netdb.h>
-#include <string.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "filters/ButterworthFilter.h"
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
-#include <signal.h>
+#include <Eigen/Dense>
+#include <iostream>
+
+#include "redis/RedisClient.h"
+#include "filters/ButterworthFilter.h"
+#include "tinyxml2.h"
+
 bool runloop = true;
 void sighandler(int sig)
 { runloop = false; }
@@ -25,12 +27,59 @@ void sighandler(int sig)
 using namespace std;
 using namespace Eigen;
 
-string SENSED_FORCE_KEY = "sai2::ATIGamma_Sensor::force_torque";
+string SENSED_FORCE_KEY;
+string SENSED_MOMENT_KEY;
 
-sai::ButterworthFilter filter;
-const double cutoff_freq = 0.05;  //the cutoff frequency of the filter, in the range of (0 0.5) of sampling freq
-bool use_filter = false;
+struct RedisDriverConfig {
+	std::string robot_name;
+	std::string link_name;
+	std::string sensor_ip_address;
+	std::string redis_prefix = "sai";
+	bool use_filter = false;
+	double normalized_filter_cutoff_frequency = 0.05;
+};
 
+RedisDriverConfig parseRedisDriverConfig(const std::string& config_file_path) {
+	RedisDriverConfig config;
+	tinyxml2::XMLDocument doc;
+	if (doc.LoadFile(config_file_path.c_str()) != tinyxml2::XML_SUCCESS) {
+		throw std::runtime_error("Could not load driver config file: " + config_file_path);
+	}
+
+	tinyxml2::XMLElement* driver_xml = doc.FirstChildElement("saiATIGammaDriverConfig");
+	if (driver_xml == nullptr) {
+		throw std::runtime_error("No 'saiATIGammaDriverConfig' element found in driver config file: " + config_file_path);
+	}
+
+	if(!driver_xml->Attribute("robotName")) {
+		throw std::runtime_error("No 'robotName' attribute found in driver config file: " + config_file_path);
+	}
+	config.robot_name = driver_xml->Attribute("robotName");
+
+	if(!driver_xml->Attribute("linkName")) {
+		throw std::runtime_error("No 'linkName' attribute found in driver config file: " + config_file_path);
+	}
+	config.link_name = driver_xml->Attribute("linkName");
+
+	if(!driver_xml->Attribute("sensorIpAddress")) {
+		throw std::runtime_error("No 'sensorIpAddress' attribute found in driver config file: " + config_file_path);
+	}
+	config.sensor_ip_address = driver_xml->Attribute("sensorIpAddress");
+
+	if(driver_xml->Attribute("redisPrefix")) {
+		config.redis_prefix = driver_xml->Attribute("redisPrefix");
+	}
+
+	if(driver_xml->Attribute("useFilter")) {
+		config.use_filter = driver_xml->BoolAttribute("useFilter");
+	}
+
+	if(driver_xml->Attribute("filterCutoff")) {
+		config.normalized_filter_cutoff_frequency = driver_xml->DoubleAttribute("normalizedFilterCutoff");
+	}
+
+	return config;
+}
 
 /* Typedefs used so integer sizes are more explicit */
 typedef unsigned int uint32;
@@ -70,36 +119,24 @@ int main ( int argc, char ** argv ) {
 
 	VectorXd FT_eigen = VectorXd::Zero(6);
 
-	if ( 2 > argc )
-	{
-		fprintf( stderr, "Usage: %s IPADDRESS\n", argv[0] );
-		return -1;
-	}
-	
-	std::string sensor_ip = argv[1];
-
-	if(sensor_ip == "172.16.0.20")
-	{
-		SENSED_FORCE_KEY = "sai2::ATIGamma_Sensor::Clyde::force_torque";
-	}
-	else if(sensor_ip == "172.16.0.21")
-	{
-		SENSED_FORCE_KEY = "sai2::ATIGamma_Sensor::Bonnie::force_torque";
-	}
-
-    if(use_filter)
-    {
-        filter.setDimension(6);
-        filter.setCutoffFrequency(cutoff_freq);
+	std::string config_file = "default_config.xml";
+    if (argc > 1) {
+        config_file = argv[1];
     }
+	std::string config_file_path = std::string(CONFIG_FOLDER) + "/" + config_file;
+
+	RedisDriverConfig config = parseRedisDriverConfig(config_file_path);
+
+	SENSED_FORCE_KEY = "sensors::" + config.robot_name + "::ft_sensor::" + config.link_name + "::force";
+	SENSED_MOMENT_KEY = "sensors::" + config.robot_name + "::ft_sensor::" + config.link_name + "::moment";
+
+	// setup filter
+	SaiCommon::ButterworthFilter filter(config.normalized_filter_cutoff_frequency);
+	filter.initializeFilter(FT_eigen);
 
 	// start redis client
-	HiredisServerInfo info;
-	info.hostname_ = "127.0.0.1";
-	info.port_ = 6379;
-	info.timeout_ = { 1, 500000 }; // 1.5 seconds
-	auto redis_client = CDatabaseRedisClient();
-	redis_client.serverIs(info);
+	SaiCommon::RedisClient redis_client(config.redis_prefix);
+	redis_client.connect();
 
 	// set up signal handler
 	signal(SIGABRT, &sighandler);
@@ -117,15 +154,27 @@ int main ( int argc, char ** argv ) {
 	*(uint32*)&request[4] = htonl(NUM_SAMPLES);                    /* see section 9.1 in Net F/T user manual. */
 	
 	/* Sending the request. */
-	he = gethostbyname(argv[1]);
+	he = gethostbyname(config.sensor_ip_address.c_str());
+	if (he == nullptr) {
+		cout << "Host resolution failed" << endl;
+		exit(1);
+}
 	memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(PORT);
 	
 	err = connect( socketHandle, (struct sockaddr *)&addr, sizeof(addr) );
 	if (err == -1) {
+		cout << "Connection failed" << endl;
 		exit(2);
 	}
+
+	// timeout for reply
+	struct timeval timeout;
+	timeout.tv_sec = 5;  // 5 seconds timeout
+	timeout.tv_usec = 0;
+	setsockopt(socketHandle, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
 	send( socketHandle, request, 8, 0 );
 	
 	cout << "Start streaming Force and Moment" << endl;
@@ -134,7 +183,11 @@ int main ( int argc, char ** argv ) {
 	while(runloop)
 	{
 		/* Receiving the response. */
-		recv( socketHandle, response, 36, 0 );
+		ssize_t bytesReceived = recv( socketHandle, response, 36, 0 );
+		if (bytesReceived == -1) {
+			cout << "Timed out while waiting for sensor data" << endl;
+			break;
+		}
 		resp.rdt_sequence = ntohl(*(uint32*)&response[0]);
 		resp.ft_sequence = ntohl(*(uint32*)&response[4]);
 		resp.status = ntohl(*(uint32*)&response[8]);
@@ -144,13 +197,13 @@ int main ( int argc, char ** argv ) {
 		}
 
 		Eigen::VectorXd filtered_signal = FT_eigen;
-		if(use_filter)
+		if(config.use_filter)
 		{
 		    filtered_signal = filter.update(FT_eigen);
 		}
 
-
-		redis_client.setEigenMatrixDerived(SENSED_FORCE_KEY, filtered_signal);
+		redis_client.setEigen(SENSED_FORCE_KEY, filtered_signal.head(3));
+		redis_client.setEigen(SENSED_MOMENT_KEY, filtered_signal.tail(3));
 
 		// /* Output the response data. */
 		// cout << "Status : " << resp.status << endl;

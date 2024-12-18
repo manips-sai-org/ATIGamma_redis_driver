@@ -1,0 +1,3 @@
+<?xml version="1.0" ?>
+
+<saiATIGammaDriverConfig robotName="FrankaRobot" linkName="eef-link" sensorIpAddress="172.16.0.20" redisPrefix="sai" useFilter="true" normalizedFilterCutoff="0.05"/>
